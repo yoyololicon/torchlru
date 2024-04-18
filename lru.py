@@ -4,18 +4,18 @@ from torchlpc import sample_wise_lpc
 from typing import Optional
 
 
-def init_lambda(module, r_min=0.1, r_max=1.0, max_phase=2 * torch.pi):
+def init_lambda(module, r_min=0.1, r_max=1.0, max_phase=torch.pi):
     if isinstance(module, LRU):
         u1, u2 = torch.rand(module.hidden_size * 2).chunk(2)
         nu_log = torch.log(-0.5 * torch.log(u1 * (r_max**2 - r_min**2) + r_min**2))
         theta_log = torch.log(max_phase * u2)
 
-        diag_lambda = torch.exp(-torch.exp(nu_log) + 1j * torch.exp(theta_log))
-        gamma_log = torch.log(torch.sqrt(1 - torch.abs(diag_lambda) ** 2))
+        # diag_lambda = torch.exp(-torch.exp(nu_log) + 1j * torch.exp(theta_log))
+        # gamma_log = torch.log(torch.sqrt(1 - torch.abs(diag_lambda) ** 2))
 
         module.weight_nu_log.data.copy_(nu_log)
         module.weight_theta_log.data.copy_(theta_log)
-        module.weight_gamma_log.data.copy_(gamma_log)
+        # module.weight_gamma_log.data.copy_(gamma_log)
 
 
 class LRU(Module):
@@ -30,7 +30,7 @@ class LRU(Module):
 
         self.weight_nu_log = torch.nn.Parameter(torch.empty(hidden_size))
         self.weight_theta_log = torch.nn.Parameter(torch.empty(hidden_size))
-        self.weight_gamma_log = torch.nn.Parameter(torch.empty(hidden_size))
+        # self.weight_gamma_log = torch.nn.Parameter(torch.empty(hidden_size))
 
         self.weight_B = torch.nn.Parameter(
             torch.empty(input_size, hidden_size, dtype=torch.complex64)
@@ -58,7 +58,10 @@ class LRU(Module):
         if hx is None:
             hx = x.new_zeros(x.size(0), self.hidden_size, dtype=torch.complex64)
 
-        B_norm = self.weight_B * self.weight_gamma_log.exp()
+        a = torch.exp(-self.weight_nu_log.exp() + 1j * self.weight_theta_log.exp())
+        b = torch.sqrt(1 - torch.abs(a) ** 2)
+
+        B_norm = self.weight_B * b
         C = self.weight_C
         D = self.weight_D
 
@@ -67,8 +70,6 @@ class LRU(Module):
                 x.shape[0], x.shape[1], -1, 2
             )
         )
-
-        a = torch.exp(-self.weight_nu_log.exp() + 1j * self.weight_theta_log.exp())
 
         a_lpc = -a.broadcast_to(u.shape).transpose(1, 2)
         u_lpc = u.transpose(1, 2)
