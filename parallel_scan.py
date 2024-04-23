@@ -2,6 +2,8 @@ from numba import cuda
 
 WARPSIZE = 32
 
+# implementation was translated from https://github.com/eamartin/parallelizing_linear_rnns/blob/master/linear_recurrent_net/linear_recurrence.cu
+
 
 @cuda.jit(device=True)
 def divide_work(n_jobs, n_workers, worker_idx) -> tuple:
