@@ -26,7 +26,7 @@ def test_equivalent(n_dims, n_steps, dtype):
     )
 
     out = cuda.device_array((n_dims, n_steps), dtype=dtype)
-    pred = compute_linear_recurrence(
+    compute_linear_recurrence(
         cuda.to_device(decays),
         cuda.to_device(impulses),
         cuda.to_device(init_states),
