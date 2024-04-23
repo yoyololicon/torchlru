@@ -6,7 +6,7 @@ from numba import cuda
 from .parallel_scan import compute_linear_recurrence
 
 
-class Recurrence(Function):
+class RecurrenceCUDA(Function):
     @staticmethod
     def forward(
         ctx, decay: torch.Tensor, impulse: torch.Tensor, initial_state: torch.Tensor
@@ -38,7 +38,7 @@ class Recurrence(Function):
             padded_decay = padded_decay[:, 1:]
 
         init = padded_grad_out.new_zeros(n_dims)
-        flipped_grad_impulse = Recurrence.apply(
+        flipped_grad_impulse = RecurrenceCUDA.apply(
             padded_decay.flip(1).conj_physical(),
             padded_grad_out.flip(1),
             init,

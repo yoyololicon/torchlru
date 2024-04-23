@@ -3,6 +3,16 @@ from torch.nn import Module
 from torchlpc import sample_wise_lpc
 from typing import Optional
 
+from .recurrence import RecurrenceCUDA
+
+
+def linear_recurrence(
+    u: torch.Tensor, a: torch.Tensor, zi: torch.Tensor
+) -> torch.Tensor:
+    if u.is_cuda:
+        return RecurrenceCUDA.apply(a, u, zi)
+    return sample_wise_lpc(u, -a.unsqueeze(-1), zi.unsqueeze(-1))
+
 
 def init_lambda(module, r_min=0.1, r_max=1.0, max_phase=torch.pi):
     if isinstance(module, LRU):
@@ -71,15 +81,12 @@ class LRU(Module):
             )
         )
 
-        a_lpc = -a.broadcast_to(u.shape).transpose(1, 2)
+        a_lpc = a.broadcast_to(u.shape).transpose(1, 2)
         u_lpc = u.transpose(1, 2)
         zi = hx
+
         filtered_u = (
-            sample_wise_lpc(
-                u_lpc.flatten(0, 1),
-                a_lpc.flatten(0, 1).unsqueeze(-1),
-                zi.flatten().unsqueeze(-1),
-            )
+            linear_recurrence(u_lpc.flatten(0, 1), a_lpc.flatten(0, 1), zi.flatten())
             .view_as(u_lpc)
             .transpose(1, 2)
         )
