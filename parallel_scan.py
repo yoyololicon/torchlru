@@ -1,5 +1,6 @@
-import numba
 from numba import cuda
+
+WARPSIZE = 32
 
 
 @cuda.jit(device=True)
@@ -20,7 +21,7 @@ def compute_warp_start_stop(blockIdx, warp_idx, n_blocks, n_steps):
     block_start, block_stop = divide_work(n_steps, n_blocks, blockIdx)
     block_jobs = block_stop - block_start
 
-    warp_start, warp_stop = divide_work(block_jobs, cuda.warpsize, warp_idx)
+    warp_start, warp_stop = divide_work(block_jobs, WARPSIZE, warp_idx)
     warp_start += block_start
     warp_stop += block_start
 
@@ -29,60 +30,55 @@ def compute_warp_start_stop(blockIdx, warp_idx, n_blocks, n_steps):
 
 @cuda.jit
 def reduction_kernel(
-    decay, impulses, initial_state, _decay_storage, _h_storage, n_dims, n_steps
+    decay, impulses, initial_state, decay_storage, h_storage, n_dims, n_steps
 ):
-    warp = cuda.threadIdx.x // cuda.warpsize
-    lane = cuda.threadIdx.x % cuda.warpsize
+    warp, lane = divmod(cuda.threadIdx.x, WARPSIZE)
 
-    decay_storage = _decay_storage[cuda.blockIdx.x * (cuda.warpsize + 1) :]
-    h_storage = _h_storage[cuda.blockIdx.x * (cuda.warpsize + 1) :]
+    storage_offset = cuda.blockIdx.x * (WARPSIZE + 1)
 
     warp_start, warp_stop = compute_warp_start_stop(
-        cuda.blockIdx.x, warp, cuda.gridDim.x, n_steps
+        cuda.blockIdx.x, lane, cuda.gridDim.x, n_steps
     )
 
     # reduce within warp
-    for i in range(lane, n_dims, cuda.warpsize):
+    for i in range(warp, n_dims, (cuda.blockDim.x + WARPSIZE - 1) // WARPSIZE):
         cum_decay = 1.0
         h = 0.0
-        if (cuda.blockIdx.x == 0) and (warp == 0):
+        if (cuda.blockIdx.x == 0) and (lane == 0):
             h = initial_state[i]
 
         for t in range(warp_start, warp_stop):
             cum_decay *= decay[i, t]
             h = decay[i, t] * h + impulses[i, t]
 
-        decay_storage[warp, i] = cum_decay
-        h_storage[warp, i] = h
+        decay_storage[lane + storage_offset, i] = cum_decay
+        h_storage[lane + storage_offset, i] = h
 
     cuda.syncthreads()
 
     # reduce within block
-    for i in range(lane + warp * cuda.warpsize, n_dims, cuda.blockDim.x):
+    for i in range(cuda.threadIdx.x, n_dims, cuda.blockDim.x):
         cum_decay = 1.0
         h = 0.0
-        for t in range(cuda.warpsize):
+        for t in range(storage_offset, storage_offset + WARPSIZE):
             cum_decay *= decay_storage[t, i]
             h = decay_storage[t, i] * h + h_storage[t, i]
 
-        decay_storage[cuda.warpsize, i] = cum_decay
-        h_storage[cuda.warpsize, i] = h
+        decay_storage[WARPSIZE + storage_offset, i] = cum_decay
+        h_storage[WARPSIZE + storage_offset, i] = h
 
 
 @cuda.jit
 def block_scan_kernel(decay_storage, h_storage, n_dims, n_blocks):
     for i in range(
-        cuda.threadIdx.x + cuda.blockIdx.x * cuda.blockDim.x,
+        cuda.grid(1),
         n_dims,
-        cuda.blockDim.x * cuda.gridDim.x,
+        cuda.gridsize(1),
     ):
         for t in range(1, n_blocks):
-            cur_idx = t * (cuda.warpsize + 1) + cuda.warpsize
-            prev_idx = (t - 1) * (cuda.warpsize + 1) + cuda.warpsize
-            h_storage[cur_idx, i] = (
-                h_storage[prev_idx, i] * decay_storage[cur_idx, i]
-                + h_storage[cur_idx, i]
-            )
+            cur_idx = t * (WARPSIZE + 1) + WARPSIZE
+            prev_idx = (t - 1) * (WARPSIZE + 1) + WARPSIZE
+            h_storage[cur_idx, i] += h_storage[prev_idx, i] * decay_storage[cur_idx, i]
             decay_storage[cur_idx, i] *= decay_storage[prev_idx, i]
 
 
@@ -90,32 +86,32 @@ def block_scan_kernel(decay_storage, h_storage, n_dims, n_blocks):
 def warp_scan_kernel(
     decay, impulses, initial_state, out, decay_storage, h_storage, n_dims, n_steps
 ):
-    warp, lane = divmod(cuda.threadIdx.x, cuda.warpsize)
+    warp, lane = divmod(cuda.threadIdx.x, WARPSIZE)
 
-    for i in range(lane + warp * cuda.warpsize, n_dims, cuda.blockDim.x):
-        for t in range(cuda.warpsize):
-            if t == 0 and cuda.blockIdx.x == 0:
+    for i in range(cuda.threadIdx.x, n_dims, cuda.blockDim.x):
+        offset = cuda.blockIdx.x * (WARPSIZE + 1)
+        for cur_idx in range(offset, offset + WARPSIZE):
+            if cur_idx == 0:
                 continue
-            cur_idx = t + cuda.blockIdx.x * (cuda.warpsize + 1)
             prev_idx = cur_idx - 1
             h_storage[cur_idx, i] = (
-                h_storage[prev_idx, i] * decay[i, cur_idx] + h_storage[cur_idx, i]
+                h_storage[prev_idx, i] * decay_storage[cur_idx, i]
+                + h_storage[cur_idx, i]
             )
             decay_storage[cur_idx, i] *= decay_storage[prev_idx, i]
 
     cuda.syncthreads()
 
     warp_start, warp_stop = compute_warp_start_stop(
-        cuda.blockIdx.x, warp, cuda.gridDim.x, n_steps
+        cuda.blockIdx.x, lane, cuda.gridDim.x, n_steps
     )
 
     # scan within warp
-    for i in range(lane, n_dims, cuda.warpsize):
-        h = 0.0
-        if (cuda.blockIdx.x == 0) and (warp == 0):
+    for i in range(warp, n_dims, (cuda.blockDim.x + WARPSIZE - 1) // WARPSIZE):
+        if (cuda.blockIdx.x == 0) and (lane == 0):
             h = initial_state[i]
         else:
-            h = h_storage[warp - 1 + cuda.blockIdx.x * (cuda.warpsize + 1), i]
+            h = h_storage[lane - 1 + cuda.blockIdx.x * (WARPSIZE + 1), i]
 
         for t in range(warp_start, warp_stop):
             h = decay[i, t] * h + impulses[i, t]
@@ -123,21 +119,40 @@ def warp_scan_kernel(
 
 
 def compute_linear_recurrence(
-    decays, impulses, init_states, out, n_dims: int, n_steps: int, n_SMs: int = 15
+    decays, impulses, init_states, out, n_dims: int, n_steps: int
 ):
-    n_blocks = min((n_steps + cuda.warpsize - 1) // cuda.warpsize, n_SMs * 2)
+    n_blocks = (n_steps + WARPSIZE - 1) // WARPSIZE
 
-    reduction_mem_shape = (n_blocks * (cuda.warpsize + 1), n_dims)
+    reduction_mem_shape = (n_blocks * (WARPSIZE + 1), n_dims)
     decay_storage = cuda.device_array(reduction_mem_shape, dtype=decays.dtype)
     h_storage = cuda.device_array(reduction_mem_shape, dtype=impulses.dtype)
 
-    reduction_kernel[n_blocks, 1024](
+    reduction_kernel[n_blocks, 512](
         decays, impulses, init_states, decay_storage, h_storage, n_dims, n_steps
     )
 
-    block_scan_kernel[n_blocks, 1024](decay_storage, h_storage, n_dims, n_blocks)
+    block_scan_kernel[n_blocks, 512](decay_storage, h_storage, n_dims, n_blocks)
 
-    warp_scan_kernel[n_blocks, 1024](
+    warp_scan_kernel[n_blocks, 512](
         decays, impulses, init_states, out, decay_storage, h_storage, n_dims, n_steps
     )
 
+
+if __name__ == "__main__":
+    import numpy as np
+
+    n_dims = 16
+    n_steps = 20480
+    decays = np.full((n_dims, n_steps), 0.9, dtype=np.float32)
+    impulses = np.full((n_dims, n_steps), 0.0, dtype=np.float32)
+    impulses[:, 0] = 1.0
+    init_states = np.full(n_dims, 0.0, dtype=np.float32)
+
+    decays = cuda.to_device(decays)
+    impulses = cuda.to_device(impulses)
+    init_states = cuda.to_device(init_states)
+    out = cuda.device_array((n_dims, n_steps), dtype=np.float32)
+
+    compute_linear_recurrence(decays, impulses, init_states, out, n_dims, n_steps)
+
+    print(out.copy_to_host())
