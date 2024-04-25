@@ -4,12 +4,13 @@ from torchlpc import sample_wise_lpc
 from typing import Optional
 
 from .recurrence import RecurrenceCUDA
+from .parallel_scan import WARPSIZE
 
 
 def linear_recurrence(
     u: torch.Tensor, a: torch.Tensor, zi: torch.Tensor
 ) -> torch.Tensor:
-    if u.is_cuda:
+    if u.is_cuda and (u.size(0) * WARPSIZE < u.size(1)):
         return RecurrenceCUDA.apply(a, u, zi)
     return sample_wise_lpc(u, -a.unsqueeze(-1), zi.unsqueeze(-1))
 
