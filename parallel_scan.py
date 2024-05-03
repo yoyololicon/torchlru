@@ -123,7 +123,8 @@ def warp_scan_kernel(
 def compute_linear_recurrence(
     decays, impulses, init_states, out, n_dims: int, n_steps: int
 ):
-    n_blocks = (n_steps + WARPSIZE - 1) // WARPSIZE
+    SMS = getattr(cuda.get_current_device(), "MULTIPROCESSOR_COUNT")
+    n_blocks = min((n_steps + WARPSIZE - 1) // WARPSIZE, SMS)
 
     reduction_mem_shape = (n_blocks * (WARPSIZE + 1), n_dims)
     decay_storage = cuda.device_array(reduction_mem_shape, dtype=decays.dtype)
